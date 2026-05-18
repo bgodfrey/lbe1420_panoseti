@@ -67,5 +67,5 @@ LBE-142x configuration tool. The
 useful reference for the older Leo Bodnar GPSDO protocol.
 
 ## Other Info
-The command line interface that can be run from the command line is [simontheu/lbe-1420](https://github.com/simontheu/lbe-1420).
-Firmware updates still have to be done using the Winows utility from the product page for the LBE-1420 [here](https://www.leobodnar.com/shop/index.php?main_page=product_info&products_id=393). Current version as of May 2026 is 1.08.
+- The command line interface that can be run from the command line is [simontheu/lbe-1420](https://github.com/simontheu/lbe-1420).
+- Firmware updates still have to be done using the Windows utility from the product page for the LBE-1420 [here](https://www.leobodnar.com/shop/index.php?main_page=product_info&products_id=393). The current firmware version as of May 2026 is 1.08.
