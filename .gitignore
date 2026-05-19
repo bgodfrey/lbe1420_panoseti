@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# Local USB capture used to reverse-engineer the GNSS opcode; not tracked.
+lbe1420.pcapng

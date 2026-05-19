@@ -2,8 +2,9 @@
 """Configuration utility for the Leo Bodnar LBE-1420 GPS-locked clock source.
 
 Supports locating the LBE-1420, reporting its firmware version, setting the
-OUT1 frequency, and reporting GNSS conditions. Further configuration
-functionality will be added over time.
+OUT1 frequency, selecting which GNSS constellations the receiver uses, and
+reporting GNSS conditions. Further configuration functionality will be
+added over time.
 
 Frequency configuration is sent over the device's HID interface as a feature
 report; the LBE-1420 firmware performs the internal PLL synthesis, so the
@@ -47,6 +48,7 @@ LBE_1420_PID = 0x2443
 # HID Report ID, and every report is a fixed LBE_REPORT_SIZE-byte payload.
 LBE_REPORT_SIZE = 60
 LBE_1420_SET_F1 = 0x04        # opcode: set OUT1 frequency (persisted)
+LBE_1420_SET_GNSS = 0x07      # opcode: set enabled GNSS constellations
 LBE_STATUS_REPORT_ID = 0x4B   # report ID for the status read
 LBE_1420_MAX_FREQ = 1_600_000_000  # Hz; firmware-accepted maximum for OUT1
 
@@ -54,6 +56,20 @@ LBE_1420_MAX_FREQ = 1_600_000_000  # Hz; firmware-accepted maximum for OUT1
 LBE_GPS_LOCK_BIT = 1 << 0
 LBE_PLL_LOCK_BIT = 1 << 1
 LBE_ANT_OK_BIT = 1 << 2
+
+# GNSS constellation enable bits for the SET_GNSS feature report; report[1]
+# is the OR of these. Each bit position was measured directly by USB-capturing
+# the Windows config tool (v1.07) while toggling that one constellation -- the
+# tool exposes exactly these five. Bits 4 and 5 were never observed.
+GNSS_BITS: dict[str, int] = {
+    "gps": 1 << 0,
+    "sbas": 1 << 1,
+    "galileo": 1 << 2,
+    "beidou": 1 << 3,
+    "glonass": 1 << 6,
+}
+# Mask the Windows tool restores as the factory default: GPS + SBAS only.
+GNSS_DEFAULT_MASK = GNSS_BITS["gps"] | GNSS_BITS["sbas"]
 
 # NMEA stream on the CDC serial port.
 NMEA_BAUD = 9600
@@ -167,6 +183,25 @@ def set_frequency(hidraw_path: str, hz: int) -> None:
     report = bytearray(LBE_REPORT_SIZE)
     report[0] = LBE_1420_SET_F1
     report[1:5] = struct.pack("<I", hz)
+    fd = os.open(hidraw_path, os.O_RDWR)
+    try:
+        fcntl.ioctl(fd, HIDIOCSFEATURE, bytes(report))
+    finally:
+        os.close(fd)
+
+
+def set_gnss(hidraw_path: str, mask: int) -> None:
+    """Set which GNSS constellations the receiver uses, via a HID feature
+    report.
+
+    `mask` is the OR of GNSS_BITS values. report[0] is the opcode and
+    report[1] carries the bitmask; the rest of the 60-byte report stays zero.
+    The firmware reconfigures its internal receiver, so GPS lock drops
+    briefly before re-acquiring.
+    """
+    report = bytearray(LBE_REPORT_SIZE)
+    report[0] = LBE_1420_SET_GNSS
+    report[1] = mask
     fd = os.open(hidraw_path, os.O_RDWR)
     try:
         fcntl.ioctl(fd, HIDIOCSFEATURE, bytes(report))
@@ -353,6 +388,72 @@ def cmd_set_f1(hz: int) -> int:
     return 0
 
 
+def _parse_gnss_spec(spec: str) -> tuple[int, list[str]] | str:
+    """Resolve a --gnss argument to (mask, constellation names).
+
+    Accepts a comma-separated list of constellation names, the keyword
+    'default' (GPS + SBAS) or 'all' (every named constellation). Returns an
+    error string instead if the spec is empty or names something unknown.
+    """
+    spec = spec.strip().lower()
+    if spec == "default":
+        names = [n for n, b in GNSS_BITS.items() if b & GNSS_DEFAULT_MASK]
+        return GNSS_DEFAULT_MASK, names
+    if spec == "all":
+        return sum(GNSS_BITS.values()), list(GNSS_BITS)
+    # dict.fromkeys drops duplicates (e.g. "gps,gps") while keeping order.
+    names = list(dict.fromkeys(n.strip() for n in spec.split(",") if n.strip()))
+    if not names:
+        return "No constellations given."
+    unknown = [n for n in names if n not in GNSS_BITS]
+    if unknown:
+        return (f"Unknown constellation(s): {', '.join(unknown)}. "
+                f"Valid: {', '.join(GNSS_BITS)} (or 'default', 'all').")
+    mask = 0
+    for n in names:
+        mask |= GNSS_BITS[n]
+    return mask, names
+
+
+def cmd_gnss(spec: str) -> int:
+    """Set which GNSS constellations the LBE-1420's receiver uses."""
+    parsed = _parse_gnss_spec(spec)
+    if isinstance(parsed, str):
+        print(parsed)
+        return 1
+    mask, names = parsed
+    if mask == 0:
+        print("Refusing to disable every constellation -- the receiver "
+              "needs at least one (e.g. --gnss gps).")
+        return 1
+
+    # Resolve the serial port first so the HID node can be matched by serial
+    # number, picking the right unit when several are connected.
+    port = find_lbe1420()
+    serial_number = port.serial_number if port else None
+    hidraw_path = find_lbe1420_hidraw(serial_number)
+    if hidraw_path is None:
+        print("No LBE-1420 HID interface found.")
+        return 1
+
+    print(f"Enabling GNSS constellations: {', '.join(sorted(names))} "
+          f"(mask 0x{mask:02x}) via {hidraw_path} ...")
+    try:
+        set_gnss(hidraw_path, mask)
+    except PermissionError:
+        print(UDEV_HELP)
+        return 1
+    except OSError as exc:
+        print(f"Failed to set GNSS constellations: {exc}")
+        return 1
+
+    # The setting is not echoed by the status report, so there is nothing to
+    # read back -- report what was sent and warn about the lock recovery.
+    print("  sent. The receiver re-acquires satellites: GPS lock drops "
+          "briefly, then recovers.")
+    return 0
+
+
 def _format_position(snap: GnssSnapshot) -> str:
     """Render the calculated position from a GNSS snapshot."""
     if snap["lat"] is None or snap["lon"] is None:
@@ -452,13 +553,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Configuration utility for the Leo Bodnar LBE-1420."
     )
-    # --f1 and --status are distinct actions and cannot be combined.
+    # --f1, --gnss and --status are distinct actions and cannot be combined.
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--f1",
         type=int,
         metavar="HZ",
         help=f"set OUT1 frequency in Hz (1 .. {LBE_1420_MAX_FREQ})",
+    )
+    group.add_argument(
+        "--gnss",
+        metavar="LIST",
+        help="set enabled GNSS constellations: a comma-separated list of "
+             f"{', '.join(GNSS_BITS)}, or 'default' (GPS+SBAS) or 'all'",
     )
     group.add_argument(
         "--status",
@@ -469,6 +576,8 @@ def main() -> int:
 
     if args.f1 is not None:
         return cmd_set_f1(args.f1)
+    if args.gnss is not None:
+        return cmd_gnss(args.gnss)
     if args.status:
         return cmd_status()
     # No action requested: fall back to printing device identity.

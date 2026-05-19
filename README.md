@@ -25,9 +25,19 @@ python3 lbe-1420-conf.py
 # Set the OUT1 frequency (Hz); range 1 .. 1,600,000,000
 python3 lbe-1420-conf.py --f1 1420000000
 
+# Select which GNSS constellations the receiver uses
+python3 lbe-1420-conf.py --gnss gps,galileo,glonass
+python3 lbe-1420-conf.py --gnss default   # GPS + SBAS (factory default)
+python3 lbe-1420-conf.py --gnss all
+
 # Report GNSS conditions: fix, position, satellites, C/N0, lock state
 python3 lbe-1420-conf.py --status
 ```
+
+`--gnss` accepts a comma-separated list of `gps`, `sbas`, `galileo`,
+`beidou`, `glonass`, or the keywords `default` (GPS + SBAS) or `all`.
+Changing the set makes the receiver re-acquire satellites, so GPS lock
+drops briefly before recovering.
 
 ## How it works
 
@@ -38,7 +48,10 @@ The LBE-1420 exposes two interfaces over USB:
   and per-satellite C/N0. This port is accessible to the `dialout` group.
 - A **HID interface** (`/dev/hidraw*`) used for configuration. `--f1` sends the
   desired frequency directly in Hz as a HID feature report; the device firmware
-  performs the internal PLL synthesis.
+  performs the internal PLL synthesis. `--gnss` sends a constellation-enable
+  bitmask the same way (opcode `0x07`); the firmware then reconfigures its
+  internal GNSS receiver. That opcode and bit layout were recovered by
+  USB-capturing the Windows configuration tool, since they are not documented.
 
 The device is identified by its USB descriptor (`product` string and the
 `1dd2:2443` vendor/product ID), and the firmware version is read from the
