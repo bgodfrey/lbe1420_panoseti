@@ -72,15 +72,28 @@ LBE_ANT_OK_BIT = 1 << 2
 # is the OR of these. Each bit position was measured directly by USB-capturing
 # the Windows config tool (v1.07) while toggling that one constellation -- the
 # tool exposes exactly these five. Bits 4 and 5 were never observed.
+# NOTE: GNSS constellation selection is reverse-engineered from USB captures of
+# the vendor Windows tool, not officially documented. Empirically, BeiDou and
+# GLONASS appear mutually exclusive on this firmware/tool version: selecting
+# one prevents the other from being enabled. This utility preserves the observed
+# bit assignments, but users should not assume all constellation combinations
+# are valid.
 GNSS_BITS: dict[str, int] = {
     "gps": 1 << 0,
     "sbas": 1 << 1,
     "galileo": 1 << 2,
-    "beidou": 1 << 3,
-    "glonass": 1 << 6,
+    "beidou": 1 << 3
+    #"glonass": 1 << 6,
 }
 # Mask the Windows tool restores as the factory default: GPS + SBAS only.
 GNSS_DEFAULT_MASK = GNSS_BITS["gps"] | GNSS_BITS["sbas"]
+
+# What Samuli suggested we use for the F9T
+GNSS_RECOMMENDED_MASK = (
+    GNSS_BITS["gps"]
+    | GNSS_BITS["sbas"]
+    | GNSS_BITS["galileo"]
+    | GNSS_BITS["beidou"])
 
 # NMEA stream on the CDC serial port.
 NMEA_BAUD = 9600
@@ -212,8 +225,17 @@ def find_lbe1420_hid_linux(serial_number: str | None = None) -> str | None:
         return f"/dev/{name}"
     return None
 
+#def debug_hid_devices() -> None:
+#    print("HID devices matching LBE-1420 VID/PID:")
+#    for i, dev in enumerate(hid.enumerate(LBE_1420_VID, LBE_1420_PID)):
+#        print(f"\n[{i}]")
+#        for key in sorted(dev):
+#            print(f"  {key}: {dev[key]!r}")
+
 def find_lbe1420_hid_windows(serial_number: str | None = None) -> bytes | None:
+    
     """Return the HIDAPI path for the LBE-1420 on Windows."""
+    #debug_hid_devices()
     for dev in hid.enumerate(LBE_1420_VID, LBE_1420_PID):
         if serial_number is not None and dev.get("serial_number") != serial_number:
             continue
@@ -231,11 +253,20 @@ def find_lbe1420_hid_windows(serial_number: str | None = None) -> bytes | None:
 
 def send_feature_report(hid_path: str | bytes, report: bytearray) -> None:
     """Send one HID feature report using the OS-specific backend."""
+    
+    print(f"DEBUG write len={len(report)} report={bytes(report[:16]).hex(' ')}")
     if IS_WINDOWS:
         dev = hid.device()
         dev.open_path(hid_path)
         try:
-            dev.send_feature_report(report)
+            # On Windows, HIDAPI feature-report length includes the Report ID byte,
+            # so match the device's 61-byte FeatureReportByteLength.
+            report_bytes = b"\x00" + bytes(report)
+            print(f"DEBUG windows write len={len(report_bytes)} report={report_bytes[:16].hex(' ')}")
+            n = dev.send_feature_report(report_bytes)
+            print(f"DEBUG wrote {n} bytes")
+            if n != len(report_bytes):
+                raise OSError(f"short HID feature-report write: wrote {n} of {len(report_bytes)} bytes")
         finally:
             dev.close()
         return
@@ -256,7 +287,8 @@ def get_feature_report(hid_path: str | bytes, report_id: int) -> bytes:
         dev = hid.device()
         dev.open_path(hid_path)
         try:
-            return bytes(dev.get_feature_report(report_id, LBE_REPORT_SIZE))
+            # On Windows, HIDAPI expects the feature-report length to include the Report ID byte, so request one extra byte.
+            return bytes(dev.get_feature_report(report_id, LBE_REPORT_SIZE + 1))
         finally:
             dev.close()
 
@@ -306,10 +338,13 @@ def read_status(hid_path: str | bytes) -> dict[str, int | bool]:
     """Read the LBE-1420 status feature report and return it as a dict."""
     report = get_feature_report(hid_path, LBE_STATUS_REPORT_ID)
 
-    raw = report[1]
+    # Windows HIDAPI returns an extra leading byte for feature reports.
+    offset = 1 if IS_WINDOWS else 0
+
+    raw = report[offset + 1]
     return {
         "raw_status": raw,
-        "frequency1": int.from_bytes(report[6:10], "little"),
+        "frequency1": int.from_bytes(report[offset + 6:offset + 10], "little"),
         "gps_locked": bool(raw & LBE_GPS_LOCK_BIT),
         "pll_locked": bool(raw & LBE_PLL_LOCK_BIT),
         "antenna_ok": bool(raw & LBE_ANT_OK_BIT),
@@ -488,8 +523,12 @@ def _parse_gnss_spec(spec: str) -> tuple[int, list[str]] | str:
     if spec == "default":
         names = [n for n, b in GNSS_BITS.items() if b & GNSS_DEFAULT_MASK]
         return GNSS_DEFAULT_MASK, names
-    if spec == "all":
+    elif spec == "all":
         return sum(GNSS_BITS.values()), list(GNSS_BITS)
+    elif spec == "recommended":
+        names = [n for n, b in GNSS_BITS.items() if b & GNSS_RECOMMENDED_MASK]
+        return GNSS_RECOMMENDED_MASK, names
+    
     # dict.fromkeys drops duplicates (e.g. "gps,gps") while keeping order.
     names = list(dict.fromkeys(n.strip() for n in spec.split(",") if n.strip()))
     if not names:
