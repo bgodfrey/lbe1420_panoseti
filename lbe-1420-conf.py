@@ -20,8 +20,20 @@ HID protocol per the reverse-engineering work in bvernoux/lbe-142x.
 Made with Claude
 """
 
+import platform
+IS_WINDOWS = platform.system() == "Windows"
+IS_LINUX = platform.system() == "Linux"
+
 import argparse
-import fcntl
+if IS_LINUX:
+    print('Identified Linux')
+    import fcntl
+    import usb.core
+
+if IS_WINDOWS:
+    print('Identified Windows')
+    import hid 
+
 import os
 import struct
 import sys
@@ -31,7 +43,6 @@ from typing import Any
 import serial
 import serial.tools.list_ports
 from serial.tools.list_ports_common import ListPortInfo
-import usb.core
 
 # Aggregated GNSS readout produced by read_gnss_status(); the values are
 # heterogeneous (strings, floats, the satellites sub-dict), hence Any.
@@ -90,31 +101,34 @@ MODE="0660", GROUP="plugdev"' | sudo tee /etc/udev/rules.d/99-lbe-1420.rules
 Then replug the device (your user must be in the 'plugdev' group)."""
 
 
-def _ioc(direction: int, type_: int, nr: int, size: int) -> int:
-    """Encode a Linux ioctl request number (asm-generic layout)."""
-    return (direction << 30) | (size << 16) | (type_ << 8) | nr
+if IS_LINUX:
+    def _ioc(direction: int, type_: int, nr: int, size: int) -> int:
+        """Encode a Linux ioctl request number (asm-generic layout)."""
+        return (direction << 30) | (size << 16) | (type_ << 8) | nr
 
 
-# HIDIOCSFEATURE / HIDIOCGFEATURE for a report of LBE_REPORT_SIZE bytes.
-# Both directions are READ|WRITE because the kernel needs the buffer pointer.
-_IOC_WRITE = 1
-_IOC_READ = 2
-HIDIOCSFEATURE = _ioc(_IOC_READ | _IOC_WRITE, ord("H"), 0x06, LBE_REPORT_SIZE)
-HIDIOCGFEATURE = _ioc(_IOC_READ | _IOC_WRITE, ord("H"), 0x07, LBE_REPORT_SIZE)
+    # HIDIOCSFEATURE / HIDIOCGFEATURE for a report of LBE_REPORT_SIZE bytes.
+    # Both directions are READ|WRITE because the kernel needs the buffer pointer.
+    _IOC_WRITE = 1
+    _IOC_READ = 2
+    HIDIOCSFEATURE = _ioc(_IOC_READ | _IOC_WRITE, ord("H"), 0x06, LBE_REPORT_SIZE)
+    HIDIOCGFEATURE = _ioc(_IOC_READ | _IOC_WRITE, ord("H"), 0x07, LBE_REPORT_SIZE)
 
 
-def find_lbe1420() -> ListPortInfo | None:
-    """Return the /dev/ttyACM* port whose USB descriptor identifies it as an
-    LBE-1420, or None if no such device is connected."""
+def find_lbe1420_port() -> ListPortInfo | None:
+    """Return the serial/NMEA port for the LBE-1420 on Linux or Windows."""
     for port in serial.tools.list_ports.comports():
-        if not port.device.startswith("/dev/ttyACM"):
+        if IS_LINUX and not port.device.startswith("/dev/ttyACM"):
             continue
-        # The device advertises "LBE-1420" in its USB product string.
-        fields = (port.product, port.description, port.manufacturer)
+
+        if port.vid == LBE_1420_VID and port.pid == LBE_1420_PID:
+            return port
+
+        fields = (port.product, port.description, port.manufacturer, port.hwid)
         if any(f and LBE_1420_ID in f.lower() for f in fields):
             return port
-    return None
 
+    return None
 
 def get_firmware_version(serial_number: str | None = None) -> str | None:
     """Return the LBE-1420 firmware version as a string (e.g. "1.07").
@@ -124,19 +138,46 @@ def get_firmware_version(serial_number: str | None = None) -> str | None:
     matching device is selected so the right unit is read when several
     LBE-1420s are connected. Returns None if the device is not found.
     """
-    for dev in usb.core.find(
-        find_all=True, idVendor=LBE_1420_VID, idProduct=LBE_1420_PID
-    ):
-        if serial_number is not None and dev.serial_number != serial_number:
-            continue
-        bcd: int = dev.bcdDevice
-        # bcdDevice is BCD-encoded: each nibble is a decimal digit, so the
-        # raw hex digits are the version digits (0x0107 -> "1.07").
-        return f"{bcd >> 8:x}.{bcd & 0xFF:02x}"
+    if IS_LINUX:
+        for dev in usb.core.find(
+            find_all=True,
+            idVendor=LBE_1420_VID,
+            idProduct=LBE_1420_PID,
+        ):
+            if serial_number is not None and dev.serial_number != serial_number:
+                continue
+
+            bcd: int = dev.bcdDevice
+            return f"{bcd >> 8:x}.{bcd & 0xFF:02x}"
+
+        return None
+
+    if IS_WINDOWS:
+        for dev in hid.enumerate(LBE_1420_VID, LBE_1420_PID):
+            if serial_number is not None and dev.get("serial_number") != serial_number:
+                continue
+
+            bcd = dev.get("release_number")
+            if bcd is None:
+                return None
+
+            return f"{bcd >> 8:x}.{bcd & 0xFF:02x}"
+
+        return None
+
     return None
 
+def find_lbe1420_hid(serial_number: str | None = None) -> str | bytes | None:
+    """Return the OS-specific HID handle/path for the LBE-1420."""
+    if IS_WINDOWS:
+        return find_lbe1420_hid_windows(serial_number)
+    if IS_LINUX:
+        return find_lbe1420_hid_linux(serial_number)
 
-def find_lbe1420_hidraw(serial_number: str | None = None) -> str | None:
+    raise RuntimeError(f"Unsupported OS: {platform.system()}")
+
+
+def find_lbe1420_hid_linux(serial_number: str | None = None) -> str | None:
     """Return the /dev/hidraw* path for the LBE-1420's HID interface, or None.
 
     If serial_number is given, only the matching unit is returned.
@@ -171,8 +212,69 @@ def find_lbe1420_hidraw(serial_number: str | None = None) -> str | None:
         return f"/dev/{name}"
     return None
 
+def find_lbe1420_hid_windows(serial_number: str | None = None) -> bytes | None:
+    """Return the HIDAPI path for the LBE-1420 on Windows."""
+    for dev in hid.enumerate(LBE_1420_VID, LBE_1420_PID):
+        if serial_number is not None and dev.get("serial_number") != serial_number:
+            continue
 
-def set_frequency(hidraw_path: str, hz: int) -> None:
+        product = (dev.get("product_string") or "").lower()
+        manufacturer = (dev.get("manufacturer_string") or "").lower()
+
+        if LBE_1420_ID in product or "leo bodnar" in manufacturer:
+            return dev["path"]
+
+        # VID/PID is likely sufficient if only one matching interface appears.
+        return dev["path"]
+
+    return None
+
+def send_feature_report(hid_path: str | bytes, report: bytearray) -> None:
+    """Send one HID feature report using the OS-specific backend."""
+    if IS_WINDOWS:
+        dev = hid.device()
+        dev.open_path(hid_path)
+        try:
+            dev.send_feature_report(report)
+        finally:
+            dev.close()
+        return
+
+    if IS_LINUX:
+        fd = os.open(hid_path, os.O_RDWR)
+        try:
+            fcntl.ioctl(fd, HIDIOCSFEATURE, bytes(report))
+        finally:
+            os.close(fd)
+        return
+
+    raise RuntimeError(f"Unsupported OS: {platform.system()}")
+
+def get_feature_report(hid_path: str | bytes, report_id: int) -> bytes:
+    """Read one HID feature report using the OS-specific backend."""
+    if IS_WINDOWS:
+        dev = hid.device()
+        dev.open_path(hid_path)
+        try:
+            return bytes(dev.get_feature_report(report_id, LBE_REPORT_SIZE))
+        finally:
+            dev.close()
+
+    if IS_LINUX:
+        report = bytearray(LBE_REPORT_SIZE)
+        report[0] = report_id
+
+        fd = os.open(hid_path, os.O_RDWR)
+        try:
+            fcntl.ioctl(fd, HIDIOCGFEATURE, report)
+        finally:
+            os.close(fd)
+
+        return bytes(report)
+
+    raise RuntimeError(f"Unsupported OS: {platform.system()}")
+
+def set_frequency(hid_path: str | bytes, hz: int) -> None:
     """Set the LBE-1420 OUT1 frequency (Hz) via a HID feature report.
 
     The frequency is sent directly to the device; its firmware performs the
@@ -183,14 +285,9 @@ def set_frequency(hidraw_path: str, hz: int) -> None:
     report = bytearray(LBE_REPORT_SIZE)
     report[0] = LBE_1420_SET_F1
     report[1:5] = struct.pack("<I", hz)
-    fd = os.open(hidraw_path, os.O_RDWR)
-    try:
-        fcntl.ioctl(fd, HIDIOCSFEATURE, bytes(report))
-    finally:
-        os.close(fd)
+    send_feature_report(hid_path, report)
 
-
-def set_gnss(hidraw_path: str, mask: int) -> None:
+def set_gnss(hid_path: str | bytes, mask: int) -> None:
     """Set which GNSS constellations the receiver uses, via a HID feature
     report.
 
@@ -202,24 +299,13 @@ def set_gnss(hidraw_path: str, mask: int) -> None:
     report = bytearray(LBE_REPORT_SIZE)
     report[0] = LBE_1420_SET_GNSS
     report[1] = mask
-    fd = os.open(hidraw_path, os.O_RDWR)
-    try:
-        fcntl.ioctl(fd, HIDIOCSFEATURE, bytes(report))
-    finally:
-        os.close(fd)
+    send_feature_report(hid_path, report)
 
 
-def read_status(hidraw_path: str) -> dict[str, int | bool]:
+def read_status(hid_path: str | bytes) -> dict[str, int | bool]:
     """Read the LBE-1420 status feature report and return it as a dict."""
-    report = bytearray(LBE_REPORT_SIZE)
-    report[0] = LBE_STATUS_REPORT_ID
-    fd = os.open(hidraw_path, os.O_RDWR)
-    try:
-        # HIDIOCGFEATURE fills the mutable buffer in place.
-        fcntl.ioctl(fd, HIDIOCGFEATURE, report)
-    finally:
-        os.close(fd)
-    # report[0] is the Report-ID echo; the firmware fields start at report[1].
+    report = get_feature_report(hid_path, LBE_STATUS_REPORT_ID)
+
     raw = report[1]
     return {
         "raw_status": raw,
@@ -334,9 +420,9 @@ def read_gnss_status(port_device: str, duration: float = STATUS_READ_SECONDS) ->
 
 def cmd_info() -> int:
     """Print the connected LBE-1420's identity and firmware version."""
-    port = find_lbe1420()
+    port = find_lbe1420_port()
     if port is None:
-        print("No LBE-1420 found among /dev/ttyACM* devices.")
+        print("No LBE-1420 serial/NMEA port found.")
         return 1
     firmware = get_firmware_version(port.serial_number)
     print(f"LBE-1420 found at {port.device}")
@@ -356,18 +442,21 @@ def cmd_set_f1(hz: int) -> int:
 
     # Resolve the serial port first so the HID node can be matched by serial
     # number, picking the right unit when several are connected.
-    port = find_lbe1420()
+    port = find_lbe1420_port()
     serial_number = port.serial_number if port else None
-    hidraw_path = find_lbe1420_hidraw(serial_number)
-    if hidraw_path is None:
+    hid_path = find_lbe1420_hid(serial_number)
+    if hid_path is None:
         print("No LBE-1420 HID interface found.")
         return 1
 
-    print(f"Setting OUT1 to {hz} Hz via {hidraw_path} ...")
+    print(f"Setting OUT1 to {hz} Hz via HID ...")
     try:
-        set_frequency(hidraw_path, hz)
+        set_frequency(hid_path, hz)
     except PermissionError:
-        print(UDEV_HELP)
+        if IS_LINUX:
+            print(UDEV_HELP)
+        else:
+            print("Permission denied opening the HID interface. Close the Leo Bodnar config tool and try again.")
         return 1
     except OSError as exc:
         print(f"Failed to set frequency: {exc}")
@@ -375,7 +464,7 @@ def cmd_set_f1(hz: int) -> int:
 
     # Read the status report back to confirm the new setting took effect.
     try:
-        status = read_status(hidraw_path)
+        status = read_status(hid_path)
     except OSError as exc:
         print(f"Frequency set, but status read-back failed: {exc}")
         return 0
@@ -429,19 +518,22 @@ def cmd_gnss(spec: str) -> int:
 
     # Resolve the serial port first so the HID node can be matched by serial
     # number, picking the right unit when several are connected.
-    port = find_lbe1420()
+    port = find_lbe1420_port()
     serial_number = port.serial_number if port else None
-    hidraw_path = find_lbe1420_hidraw(serial_number)
-    if hidraw_path is None:
+    hid_path = find_lbe1420_hid(serial_number)
+    if hid_path is None:
         print("No LBE-1420 HID interface found.")
         return 1
 
     print(f"Enabling GNSS constellations: {', '.join(sorted(names))} "
-          f"(mask 0x{mask:02x}) via {hidraw_path} ...")
+        f"(mask 0x{mask:02x}) via HID ...")
     try:
-        set_gnss(hidraw_path, mask)
+        set_gnss(hid_path, mask)
     except PermissionError:
-        print(UDEV_HELP)
+        if IS_LINUX:
+            print(UDEV_HELP)
+        else:
+            print("Permission denied opening the HID interface. Close the Leo Bodnar config tool and try again.")
         return 1
     except OSError as exc:
         print(f"Failed to set GNSS constellations: {exc}")
@@ -466,9 +558,9 @@ def _format_position(snap: GnssSnapshot) -> str:
 
 def cmd_status() -> int:
     """Report GNSS conditions from the NMEA stream plus device lock state."""
-    port = find_lbe1420()
+    port = find_lbe1420_port()
     if port is None:
-        print("No LBE-1420 found among /dev/ttyACM* devices.")
+        print("No LBE-1420 serial/NMEA port found.")
         return 1
 
     print(f"Capturing NMEA for {STATUS_READ_SECONDS:.0f}s on {port.device} ...")
@@ -529,15 +621,18 @@ def cmd_status() -> int:
 
     # Device-level lock state from the HID status report (best effort: the
     # GNSS data above is still useful even if the HID node is inaccessible).
-    hidraw_path = find_lbe1420_hidraw(port.serial_number)
+    hid_path = find_lbe1420_hid(port.serial_number)
     print("  device (HID):")
-    if hidraw_path is None:
+    if hid_path is None:
         print("    HID interface not found.")
         return 0
     try:
-        status = read_status(hidraw_path)
+        status = read_status(hid_path)
     except PermissionError:
-        print("    not accessible -- run --f1 once for the udev-rule hint.")
+        if IS_LINUX:
+            print("    not accessible -- run --f1 once for the udev-rule hint.")
+        else:
+            print("    not accessible -- close the Leo Bodnar config tool and try again.")
         return 0
     except OSError as exc:
         print(f"    status read failed: {exc}")

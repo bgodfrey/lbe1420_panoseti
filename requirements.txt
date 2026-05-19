@@ -1,5 +1,14 @@
 # Runtime dependencies for lbe-1420-conf.py (Python 3.12+).
-# HID access uses the stdlib (fcntl/ioctl), so no hidapi package is needed.
+#
+# Linux HID access uses stdlib fcntl/ioctl.
+# Windows HID access uses hidapi.
+#
+# Cross-platform CDC serial-port discovery and NMEA stream reading.
+pyserial>=3.5
 
-pyserial>=3.5    # CDC serial port discovery and NMEA stream
-pyusb>=1.2.1     # USB descriptor reads (firmware version via bcdDevice)
+# Linux only: USB descriptor reads for firmware version via bcdDevice.
+# HID feature reports use stdlib fcntl/ioctl on /dev/hidraw*.
+pyusb>=1.2.1; platform_system == "Linux"
+
+# Windows only: HID feature reports and firmware release_number via HIDAPI.
+hidapi>=0.14.0; platform_system == "Windows"
