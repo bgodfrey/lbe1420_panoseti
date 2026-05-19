@@ -536,7 +536,8 @@ def _parse_gnss_spec(spec: str) -> tuple[int, list[str]] | str:
     unknown = [n for n in names if n not in GNSS_BITS]
     if unknown:
         return (f"Unknown constellation(s): {', '.join(unknown)}. "
-                f"Valid: {', '.join(GNSS_BITS)} (or 'default', 'all').")
+                f"Valid: {', '.join(GNSS_BITS)} "
+                f"(or 'recommended', 'default', 'all').")
     mask = 0
     for n in names:
         mask |= GNSS_BITS[n]
@@ -699,7 +700,8 @@ def main() -> int:
         "--gnss",
         metavar="LIST",
         help="set enabled GNSS constellations: a comma-separated list of "
-             f"{', '.join(GNSS_BITS)}, or 'default' (GPS+SBAS) or 'all'",
+             f"{', '.join(GNSS_BITS)}, or 'recommended' "
+             "(GPS+SBAS+Galileo+BeiDou), 'default' (GPS+SBAS) or 'all'",
     )
     group.add_argument(
         "--status",
