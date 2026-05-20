@@ -14,7 +14,7 @@ and reports GNSS conditions. It runs on both Linux and Windows.
   pip install -r requirements.txt
   ```
 
-  `pyserial` is used on both platforms for CDC serial-port discovery and
+  `pyserial` is used on both platforms for Virtual COM port discovery and
   reading the NMEA stream. The HID backend is platform-specific, and the
   markers in `requirements.txt` install only what each OS needs:
 
