@@ -3,3 +3,6 @@ __pycache__/
 
 # Local USB capture used to reverse-engineer the GNSS opcode; not tracked.
 lbe1420.pcapng
+
+# tinyPFA logger output
+log_*.txt

@@ -180,9 +180,9 @@ def main():
                 if now - last_status_time >= STATUS_INTERVAL_SEC:
                     elapsed = now - start_time
                     print(
-                        f"[status] elapsed={elapsed:7.1f}s  "
-                        f"collected={format_bytes(total_bytes_collected)}  "
-                        f"file={current_path}"
+                        f"[status] time elapsed = {elapsed:7.1f}s  "
+                        f"data collected={format_bytes(total_bytes_collected)}  "
+                        f"file = {current_path}"
                     )
                     last_status_time = now
 
