@@ -24,6 +24,9 @@ TIMEOUT = 1.0
 # Default rollover threshold in megabytes (overridable via --max-size).
 DEFAULT_MAX_FILE_SIZE_MB = 10
 
+# In non-verbose mode, print a status line at most this often (seconds).
+STATUS_INTERVAL_SEC = 10.0
+
 
 def default_savefile() -> str:
     """
@@ -63,6 +66,15 @@ def parse_args() -> argparse.Namespace:
             f"to a new file. Defaults to {DEFAULT_MAX_FILE_SIZE_MB} MB."
         ),
     )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help=(
+            "Echo every measurement to the terminal as it is logged. "
+            "Without this flag, a status line (total data collected) is "
+            f"printed every {int(STATUS_INTERVAL_SEC)} seconds instead."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -94,6 +106,17 @@ def should_roll_file(fh, max_size_bytes: int) -> bool:
     return fh.tell() >= max_size_bytes
 
 
+def format_bytes(num_bytes: int) -> str:
+    """
+    Render a byte count as a human-readable string (B / KB / MB / GB).
+    """
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024.0 or unit == "GB":
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+
+
 def main():
     args = parse_args()
 
@@ -106,6 +129,11 @@ def main():
     base_path: Path = args.savefile
     current_path: Path = base_path
     roll_index = 0
+
+    # Counters/timers used for the periodic status line in non-verbose mode.
+    total_bytes_collected = 0
+    start_time = time.monotonic()
+    last_status_time = start_time
 
     log_fh = None
     ser = None
@@ -137,10 +165,26 @@ def main():
             # so a transient line-noise glitch doesn't kill the logger.
             line = raw.decode("ascii", errors="replace")
 
-            # Persist the line to disk and mirror it to the terminal so the
-            # operator can watch the stream live.
+            # Persist the line to disk; in verbose mode also mirror it to the
+            # terminal so the operator can watch the stream live.
             log_fh.write(line)
-            print(line, end="")
+            total_bytes_collected += len(line)
+
+            if args.verbose:
+                print(line, end="")
+            else:
+                # Quiet mode: emit a periodic status line so the operator
+                # knows the logger is still alive and how much has been
+                # captured so far.
+                now = time.monotonic()
+                if now - last_status_time >= STATUS_INTERVAL_SEC:
+                    elapsed = now - start_time
+                    print(
+                        f"[status] elapsed={elapsed:7.1f}s  "
+                        f"collected={format_bytes(total_bytes_collected)}  "
+                        f"file={current_path}"
+                    )
+                    last_status_time = now
 
             # When the file gets large, close it and start a new one with an
             # incrementing suffix to keep individual files manageable.
