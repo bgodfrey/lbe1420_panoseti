@@ -59,6 +59,7 @@ LBE_1420_PID = 0x2443
 # HID Report ID, and every report is a fixed LBE_REPORT_SIZE-byte payload.
 LBE_REPORT_SIZE = 60
 LBE_1420_SET_F1 = 0x04        # opcode: set OUT1 frequency (persisted)
+LBE_1420_EN_OUT1 = 0x01        # opcode: enable/disable OUT1 output
 LBE_1420_SET_GNSS = 0x07      # opcode: set enabled GNSS constellations
 LBE_STATUS_REPORT_ID = 0x4B   # report ID for the status read
 LBE_1420_MAX_FREQ = 1_600_000_000  # Hz; firmware-accepted maximum for OUT1
@@ -67,6 +68,7 @@ LBE_1420_MAX_FREQ = 1_600_000_000  # Hz; firmware-accepted maximum for OUT1
 LBE_GPS_LOCK_BIT = 1 << 0
 LBE_PLL_LOCK_BIT = 1 << 1
 LBE_ANT_OK_BIT = 1 << 2
+LBE_OUTPUT_ENABLED_BIT = 1 << 4
 
 # GNSS constellation enable bits for the SET_GNSS feature report; report[1]
 # is the OR of these. Each bit position was measured directly by USB-capturing
@@ -128,6 +130,9 @@ if IS_LINUX:
     HIDIOCGFEATURE = _ioc(_IOC_READ | _IOC_WRITE, ord("H"), 0x07, LBE_REPORT_SIZE)
 
 
+# Search the host system's serial/COM ports for a device that matches
+# the LBE-1420 vendor/product identifiers or advertises the expected USB ID.
+# This is used to find the CDC serial/NMEA interface for the device.
 def find_lbe1420_port() -> ListPortInfo | None:
     """Return the serial/NMEA port for the LBE-1420 on Linux or Windows."""
     for port in serial.tools.list_ports.comports():
@@ -143,6 +148,8 @@ def find_lbe1420_port() -> ListPortInfo | None:
 
     return None
 
+# Read the unit's firmware revision from USB descriptors. On Linux the
+# information comes from pyusb, while on Windows it comes from hidapi.
 def get_firmware_version(serial_number: str | None = None) -> str | None:
     """Return the LBE-1420 firmware version as a string (e.g. "1.07").
 
@@ -180,6 +187,9 @@ def get_firmware_version(serial_number: str | None = None) -> str | None:
 
     return None
 
+# Resolve the configuration interface for the LBE-1420 on the current OS.
+# The HID port is separate from the CDC serial/NMEA port and is used for
+# sending feature reports to configure the device.
 def find_lbe1420_hid(serial_number: str | None = None) -> str | bytes | None:
     """Return the OS-specific HID handle/path for the LBE-1420."""
     if IS_WINDOWS:
@@ -190,6 +200,8 @@ def find_lbe1420_hid(serial_number: str | None = None) -> str | bytes | None:
     raise RuntimeError(f"Unsupported OS: {platform.system()}")
 
 
+# On Linux, locate the HID interface by scanning /sys/class/hidraw and
+# matching the upstream USB device's VID/PID (and optional serial number).
 def find_lbe1420_hid_linux(serial_number: str | None = None) -> str | None:
     """Return the /dev/hidraw* path for the LBE-1420's HID interface, or None.
 
@@ -232,6 +244,8 @@ def find_lbe1420_hid_linux(serial_number: str | None = None) -> str | None:
 #        for key in sorted(dev):
 #            print(f"  {key}: {dev[key]!r}")
 
+# On Windows, the HIDAPI library enumerates connected HID devices and
+# returns the path to the matching LBE-1420 interface.
 def find_lbe1420_hid_windows(serial_number: str | None = None) -> bytes | None:
     
     """Return the HIDAPI path for the LBE-1420 on Windows."""
@@ -251,6 +265,9 @@ def find_lbe1420_hid_windows(serial_number: str | None = None) -> bytes | None:
 
     return None
 
+# Send a raw HID feature report to the device. This is the low-level write
+# primitive used by all configuration actions such as setting frequency,
+# enabling OUT1, and selecting GNSS constellations.
 def send_feature_report(hid_path: str | bytes, report: bytearray) -> None:
     """Send one HID feature report using the OS-specific backend."""
     
@@ -281,6 +298,8 @@ def send_feature_report(hid_path: str | bytes, report: bytearray) -> None:
 
     raise RuntimeError(f"Unsupported OS: {platform.system()}")
 
+# Read a raw HID feature report from the device. This is used to fetch the
+# status report that includes lock state, antenna status, and OUT1 frequency.
 def get_feature_report(hid_path: str | bytes, report_id: int) -> bytes:
     """Read one HID feature report using the OS-specific backend."""
     if IS_WINDOWS:
@@ -306,6 +325,9 @@ def get_feature_report(hid_path: str | bytes, report_id: int) -> bytes:
 
     raise RuntimeError(f"Unsupported OS: {platform.system()}")
 
+# Build and send the feature report that programs OUT1's frequency.
+# The firmware takes the requested frequency directly in Hz, so the host
+# only needs to encode the value as a little-endian 32-bit integer.
 def set_frequency(hid_path: str | bytes, hz: int) -> None:
     """Set the LBE-1420 OUT1 frequency (Hz) via a HID feature report.
 
@@ -319,6 +341,9 @@ def set_frequency(hid_path: str | bytes, hz: int) -> None:
     report[1:5] = struct.pack("<I", hz)
     send_feature_report(hid_path, report)
 
+# Build and send the feature report that selects enabled GNSS constellations.
+# The bitmask is written into report[1] and the firmware applies the new
+# constellation configuration immediately.
 def set_gnss(hid_path: str | bytes, mask: int) -> None:
     """Set which GNSS constellations the receiver uses, via a HID feature
     report.
@@ -334,6 +359,20 @@ def set_gnss(hid_path: str | bytes, mask: int) -> None:
     send_feature_report(hid_path, report)
 
 
+# Build and send the feature report that toggles the OUT1 output state.
+# This command is separate from frequency setting, so ON/OFF control can be
+# changed independently of the programmed frequency.
+def set_out1_enabled(hid_path: str | bytes, enabled: bool) -> None:
+    """Enable or disable the LBE-1420 OUT1 output via a HID feature report."""
+    report = bytearray(LBE_REPORT_SIZE)
+    report[0] = LBE_1420_EN_OUT1
+    report[1] = 1 if enabled else 0
+    send_feature_report(hid_path, report)
+
+
+# Read the status feature report and decode the relevant fields into a
+# dictionary. This includes the current OUT1 frequency and whether the
+# device has a GPS lock, PLL lock, antenna OK, and output enabled state.
 def read_status(hid_path: str | bytes) -> dict[str, int | bool]:
     """Read the LBE-1420 status feature report and return it as a dict."""
     report = get_feature_report(hid_path, LBE_STATUS_REPORT_ID)
@@ -348,9 +387,13 @@ def read_status(hid_path: str | bytes) -> dict[str, int | bool]:
         "gps_locked": bool(raw & LBE_GPS_LOCK_BIT),
         "pll_locked": bool(raw & LBE_PLL_LOCK_BIT),
         "antenna_ok": bool(raw & LBE_ANT_OK_BIT),
+        "output_enabled": bool(raw & LBE_OUTPUT_ENABLED_BIT),
     }
 
 
+# NMEA sentence helper routines used when parsing the device's serial
+# GNSS stream. These are internal utilities and are not part of the public
+# CLI-facing command set.
 def _nmea_checksum_ok(line: str) -> bool:
     """Return True if an NMEA sentence's *XX checksum matches its body.
 
@@ -387,6 +430,9 @@ def _nmea_coord(value: str, hemi: str) -> float | None:
     return -decimal if hemi in ("S", "W") else decimal
 
 
+# Open the LBE-1420's serial/NMEA interface and aggregate GNSS data over a
+# short capture window. Useful for reporting the current fix, satellite
+# counts, and other navigation state.
 def read_gnss_status(port_device: str, duration: float = STATUS_READ_SECONDS) -> GnssSnapshot:
     """Capture the NMEA stream for `duration` seconds and return an aggregated
     GNSS snapshot. Later sentences overwrite earlier ones, so the result
@@ -453,6 +499,9 @@ def read_gnss_status(port_device: str, duration: float = STATUS_READ_SECONDS) ->
     return snap
 
 
+# Command handlers implement the operations exposed by the command-line
+# interface. Each returns an exit code so main() can propagate success or
+# failure to the shell.
 def cmd_info() -> int:
     """Print the connected LBE-1420's identity and firmware version."""
     port = find_lbe1420_port()
@@ -509,6 +558,42 @@ def cmd_set_f1(hz: int) -> int:
     print(f"  PLL lock:            {'yes' if status['pll_locked'] else 'no'}")
     if not status["pll_locked"]:
         print("  (PLL may take a few seconds to re-lock after a change.)")
+    return 0
+
+
+def cmd_set_out1(enable: int) -> int:
+    """Enable or disable the LBE-1420 OUT1 output via HID."""
+    if enable not in (0, 1):
+        print("OUT1 enable must be 0 or 1.")
+        return 1
+
+    port = find_lbe1420_port()
+    serial_number = port.serial_number if port else None
+    hid_path = find_lbe1420_hid(serial_number)
+    if hid_path is None:
+        print("No LBE-1420 HID interface found.")
+        return 1
+
+    print(f"Setting OUT1 enable to {enable} via HID ...")
+    try:
+        set_out1_enabled(hid_path, bool(enable))
+    except PermissionError:
+        if IS_LINUX:
+            print(UDEV_HELP)
+        else:
+            print("Permission denied opening the HID interface. Close the Leo Bodnar config tool and try again.")
+        return 1
+    except OSError as exc:
+        print(f"Failed to set OUT1 enable state: {exc}")
+        return 1
+
+    try:
+        status = read_status(hid_path)
+    except OSError as exc:
+        print(f"OUT1 enable state set, but status read-back failed: {exc}")
+        return 0
+
+    print(f"  device reports OUT1 enabled: {'yes' if status['output_enabled'] else 'no'}")
     return 0
 
 
@@ -703,6 +788,15 @@ def main() -> int:
              f"{', '.join(GNSS_BITS)}, or 'recommended' "
              "(GPS+SBAS+Galileo+BeiDou), 'default' (GPS+SBAS) or 'all'",
     )
+    # The available CLI actions are mutually exclusive: frequency programming,
+    # GNSS constellation selection, output enable/disable, or status reporting.
+    group.add_argument(
+        "--enable",
+        type=int,
+        choices=[0, 1],
+        metavar="STATE",
+        help="enable (1) or disable (0) the OUT1 output",
+    )
     group.add_argument(
         "--status",
         action="store_true",
@@ -714,6 +808,8 @@ def main() -> int:
         return cmd_set_f1(args.f1)
     if args.gnss is not None:
         return cmd_gnss(args.gnss)
+    if args.enable is not None:
+        return cmd_set_out1(args.enable)
     if args.status:
         return cmd_status()
     # No action requested: fall back to printing device identity.
