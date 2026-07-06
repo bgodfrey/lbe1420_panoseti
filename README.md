@@ -3,7 +3,12 @@
 A command-line tool for the [Leo Bodnar LBE-1420](https://www.leobodnar.com/shop/index.php?main_page=product_info&products_id=393)
 GPS-locked clock source. It locates the device, reports its firmware version,
 sets the OUT1 frequency, selects which GNSS constellations the receiver uses,
-and reports GNSS conditions. It runs on both Linux and Windows.
+enables or disables the OUT1 output, and reports GNSS conditions. It runs on
+both Linux and Windows.
+
+![LBE-1420 receiver](figs/lbe1420_photo.png 'LBE-1420 receiver')
+
+*Photo of LBE-1420 receiver.*
 
 ## Requirements
 
@@ -30,6 +35,10 @@ python3 lbe-1420-conf.py
 
 # Set the OUT1 frequency (Hz); range 1 .. 1,600,000,000
 python3 lbe-1420-conf.py --f1 1420000000
+
+# Enable or disable OUT1 output
+python3 lbe-1420-conf.py --enable 1  # output on
+python3 lbe-1420-conf.py --enable 0  # output off
 
 # Select which GNSS constellations the receiver uses
 python3 lbe-1420-conf.py --gnss gps,galileo,beidou
@@ -70,8 +79,11 @@ The LBE-1420 exposes two interfaces over USB:
   directly in Hz as a HID feature report; the device firmware performs the
   internal PLL synthesis. `--gnss` sends a constellation-enable bitmask the
   same way (opcode `0x07`); the firmware then reconfigures its internal GNSS
-  receiver. That opcode and bit layout were recovered by USB-capturing the
-  Windows configuration tool, since they are not documented.
+  receiver. `--enable 1` and `--enable 0` send the OUT1 enable/disable feature
+  report, allowing the configured frequency to be left in place while the
+  physical output is turned on or off. Those opcodes and bit layouts were
+  recovered by USB-capturing the Windows configuration tool, since they are not
+  documented.
 
 The device is identified by its USB descriptor (`product` string and the
 `1dd2:2443` vendor/product ID), and the firmware version is read from the
@@ -81,8 +93,8 @@ The device is identified by its USB descriptor (`product` string and the
 
 ### Linux (one-time setup)
 
-`/dev/hidraw*` is root-only by default, so `--f1` and `--gnss` need a udev
-rule:
+`/dev/hidraw*` is root-only by default, so `--f1`, `--gnss`, and `--enable`
+need a udev rule:
 
 ```sh
 echo 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1dd2", ATTRS{idProduct}=="2443", MODE="0660", GROUP="plugdev"' \
@@ -91,13 +103,13 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
 Then replug the device. Your user must be in the `plugdev` group. Running
-`--f1` without this rule prints the same instructions.
+`--f1` or `--enable` without this rule prints the same instructions.
 
 ### Windows
 
 No setup is required. However, only one program can hold the HID interface
 at a time — close the Leo Bodnar configuration tool before running `--f1`
-or `--gnss`, or the write fails with a permission error.
+`--gnss`, or `--enable`; otherwise the write fails with a permission error.
 
 ## Credits
 
